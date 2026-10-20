@@ -1,0 +1,3 @@
+Step 1: Set up ADC with polling
+
+This should read the POT voltage as a number from 0-4095
