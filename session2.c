@@ -424,16 +424,22 @@ void oled_send(uint8_t byte, uint8_t is_data)                 // sends ONE byte 
     CS(1);                                                    // deselect (end of transfer)
 }
 
-void oled_set_cursor(uint8_t page, uint8_t col)               // page = row 0-7, col = pixel column 0-127
+void oled_set_cursor(uint8_t page, uint8_t col)
 {
-    oled_send(0x21, 0); oled_send(col, 0);  oled_send(127, 0);   // command 0x21: column range = col .. 127
-    oled_send(0x22, 0); oled_send(page, 0); oled_send(7, 0);     // command 0x22: page range = page .. 7
+    col += 2;                           // this display's first visible column is SEG 2
+    oled_send(0xB0 | page, 0);          // select page (line) 0-7
+    oled_send(col & 0x0F, 0);           // lower 4 bits of the starting column
+    oled_send(0x10 | (col >> 4), 0);    // upper bits of the starting column
 }
 
-void oled_clear(void)                                         // turns every pixel off
+void oled_clear(void)
 {
-    oled_set_cursor(0, 0);                                    // go to top-left
-    for (uint16_t i = 0; i < 1024; i++) oled_send(0x00, 1);   // 128 columns x 8 pages = 1024 bytes of zeros
+    for (uint8_t page = 0; page < 8; page++)   // every line
+    {
+        oled_set_cursor(page, 0);               // start of that line
+        for (uint8_t i = 0; i < 128; i++)       // 128 columns
+            oled_send(0x00, 1);                 // all pixels off
+    }
 }
 
 void oled_print(const char *s)                                // draws a string of digits
