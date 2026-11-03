@@ -24,6 +24,9 @@ void oled_clear(void);
 void oled_set_cursor(uint8_t page, uint8_t col);
 void oled_print(const char *s);
 
+void DAC_INIT(void);
+void DAC_WRITE(uint16_t value);
+
 
 void SystemClock48MHz( void )
 {
@@ -35,60 +38,67 @@ void SystemClock48MHz( void )
     RCC->CFGR = ( RCC->CFGR & (~RCC_CFGR_SW_Msk)) | RCC_CFGR_SW_PLL;
     SystemCoreClockUpdate();
 }
-
-int main(int argc, char* argv[]){
-
+int main(int argc, char* argv[])
+{
     SystemClock48MHz();
 
-    oled_config();              // set up GPIO + SPI2, reset and initialize the display
-    oled_clear();               // wipe random startup pixels
-    oled_set_cursor(0, 0);      // top line (page 0), left edge (column 0)
-    oled_print("hello");        // draw the word
+    oled_config();
+    oled_clear();
+    oled_set_cursor(0, 0);
+    oled_print("hello");
 
-    trace_printf("Testing ADC\n");
+    trace_printf("Testing ADC and DAC\n");
 
     ADC_INIT();
+    DAC_INIT();
 
     uint32_t counter = 0;
 
     while (1)
     {
-        while ((ADC1->ISR & ADC_ISR_EOC) == 0) 
+        while ((ADC1->ISR & ADC_ISR_EOC) == 0)
         {
             // Wait for conversion to complete
         }
 
-        adc_value = ADC1->DR;  // Read the converted value
+        adc_value = ADC1->DR;
 
-        millivolts = (adc_value * 3300) / 4095; // 4095 is the max value of adc we read from the dial, 3300 mili volts corresponds to 4095/4095
+        millivolts = (adc_value * 3300) / 4095;
         resistance = (adc_value * R_TOTAL_OHMS) / 4095;
 
-        char buffer[17];   // 16 characters fit on one line + 1 for the '\0' terminator
+        // Output the ADC value through the DAC on PA4
+        DAC_WRITE((uint16_t)adc_value);
 
+        char buffer[17];
 
         counter++;
-        if(counter > 50000)
+
+        if (counter > 50000)
         {
             counter = 0;
-            trace_printf("ADC Value: %u\n", adc_value); // Only print every so often
 
-            trace_printf("ADC: %u  Voltage: %u mV  Resistance: %u ohms\n", adc_value, millivolts, resistance);
+            trace_printf("ADC Value: %lu\n", (unsigned long)adc_value);
 
-            snprintf(buffer, sizeof(buffer), "ADC: %4u", (unsigned int)adc_value);   // text like "ADC: 2048"
-            oled_set_cursor(0, 0);       // page 0 = top line, column 0 = left edge
-            oled_print(buffer);          // draw it
+            trace_printf("ADC: %lu  Voltage: %lu mV  Resistance: %lu ohms\n",
+                         (unsigned long)adc_value,
+                         (unsigned long)millivolts,
+                         (unsigned long)resistance);
 
-            snprintf(buffer, sizeof(buffer), "R: %4u Ohms", (unsigned int)resistance); // text like "R: 2500 Ohms"
-            oled_set_cursor(2, 0);       // page 2 = third line
+            snprintf(buffer, sizeof(buffer), "ADC: %4u",
+                     (unsigned int)adc_value);
+
+            oled_set_cursor(0, 0);
             oled_print(buffer);
 
+            snprintf(buffer, sizeof(buffer), "R: %4u Ohms",
+                     (unsigned int)resistance);
 
+            oled_set_cursor(2, 0);
+            oled_print(buffer);
         }
     }
 
     return 0;
-
-
 }
 
 
@@ -493,4 +503,37 @@ void oled_config(void)                                        // one-time displa
 
     for (unsigned int i = 0; i < sizeof(oled_init_cmds); i++) // send every init command
         oled_send(oled_init_cmds[i], 0);                      // 0 = these are commands, not data
+}
+
+
+
+void DAC_INIT(void)
+{
+    // Enable GPIOA clock
+    RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+
+    // Enable DAC peripheral clock
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN;
+
+    // Configure PA4 as analog mode
+    GPIOA->MODER |= GPIO_MODER_MODER4;
+
+    // Disable pull-up and pull-down resistors
+    GPIOA->PUPDR &= ~GPIO_PUPDR_PUPDR4;
+
+    // Enable DAC channel 1
+    DAC->CR |= DAC_CR_EN1;
+}
+
+
+void DAC_WRITE(uint16_t value)
+{
+    // Ensure the value is within the 12-bit range
+    if (value > 4095)
+    {
+        value = 4095;
+    }
+
+    // Write value to DAC channel 1
+    DAC->DHR12R1 = value;
 }
