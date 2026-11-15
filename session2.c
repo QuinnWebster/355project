@@ -11,15 +11,32 @@
 
 #define R_TOTAL_OHMS 5000 // We found this in the pot section of the manual
 
+// Used to turn the ADC's unitless fraction (0-4095) into ohms; 5000 is the value at full turn
+
 
 void ADC_INIT(void);
+void DAC_INIT(void);
+void TIM2_INIT(void);
+void EXTI_INIT(void);
 
-volatile uint32_t adc_value = 0;
 
-volatile uint32_t millivolts = 0;
-volatile uint32_t resistance = 0;
+volatile uint32_t adc_value = 0; // The raw value read from the ADC, ranges from 0 to 4095, also the number we send to the DAC
 
-void oled_config(void);                          // tells the compiler these exist, defined further down
+volatile uint32_t millivolts = 0; // The ADC reading converted to millivolts, ranges from 0 to 3300
+                                  // Because ADC is just the voltage expressed as a number between 0 and 4095
+
+
+volatile uint32_t resistance = 0; // The resistance of the potentiometer, ranges from 0 to 5000 ohms, calculated from the ADC reading
+
+volatile uint32_t frequency = 0;     // result, in Hz
+volatile uint8_t  first_edge = 1; // If 1, then we are waiting for the first edge then well start timing
+                                    // If 0, then we are timing and waiting for the second edge to stop the timer
+
+
+volatile uint8_t use_555 = 1; // If 1, then we are measuring the 555 timer output
+                              // If 0, then we are measuring the function generator output
+
+void oled_config(void);  // tells the compiler these exist, defined further down
 void oled_clear(void);
 void oled_set_cursor(uint8_t page, uint8_t col);
 void oled_print(const char *s);
@@ -27,63 +44,74 @@ void oled_print(const char *s);
 
 void SystemClock48MHz( void )
 {
-    RCC->CR &= ~(RCC_CR_PLLON);
-    while (( RCC->CR & RCC_CR_PLLRDY ) != 0 );
-    RCC->CFGR = 0x00280000;
-    RCC->CR |= RCC_CR_PLLON;
-    while (( RCC->CR & RCC_CR_PLLRDY ) != RCC_CR_PLLRDY );
-    RCC->CFGR = ( RCC->CFGR & (~RCC_CFGR_SW_Msk)) | RCC_CFGR_SW_PLL;
-    SystemCoreClockUpdate();
+    RCC->CR &= ~(RCC_CR_PLLON); // Turn off the PLL, the PLL is part of the clock that changes the speed of it
+    while (( RCC->CR & RCC_CR_PLLRDY ) != 0 ); // Wait for the PLL to turn off
+    RCC->CFGR = 0x00280000; // Set PLL to 12, which sets the clock to 48 MHz, the fastest it can go
+    RCC->CR |= RCC_CR_PLLON; // Turn the PLL back on
+    while (( RCC->CR & RCC_CR_PLLRDY ) != RCC_CR_PLLRDY ); // Wait for the PLL to turn back on
+    RCC->CFGR = ( RCC->CFGR & (~RCC_CFGR_SW_Msk)) | RCC_CFGR_SW_PLL; // Switch the system clock to the PLL
+    SystemCoreClockUpdate(); 
 }
 
 int main(int argc, char* argv[]){
 
-    SystemClock48MHz();
+    SystemClock48MHz(); 
 
-    oled_config();              // set up GPIO + SPI2, reset and initialize the display
-    oled_clear();               // wipe random startup pixels
-    oled_set_cursor(0, 0);      // top line (page 0), left edge (column 0)
-    oled_print("hello");        // draw the word
+    oled_config();              // set up the display
+    oled_clear();               // wipe random startup pixels from display
 
-    trace_printf("Testing ADC\n");
-
+    // Init the ADC, DAC, Timer 2, and External Interrupts
     ADC_INIT();
+    DAC_INIT();
+    TIM2_INIT();     
+    EXTI_INIT();
 
-    uint32_t counter = 0;
+
+    uint32_t counter = 0; // Used for testing print statement frequency
 
     while (1)
     {
-        while ((ADC1->ISR & ADC_ISR_EOC) == 0) 
-        {
-            // Wait for conversion to complete
-        }
+        while ((ADC1->ISR & ADC_ISR_EOC) == 0){} // Poll the ADC until it finishes converting the analog voltage to a digital value
+                                                // It gets the value from the potentiometer
+    
 
-        adc_value = ADC1->DR;  // Read the converted value
+        adc_value = ADC1->DR;  // Read the converted value, DR is the data register, which is where the ADC puts the converted value
+
+        DAC->DHR12R1 = adc_value; // Write the value to the DAC
+        // Copy the ADC reading straight into the DAC's channel 1 holding register (output on PA4).
 
         millivolts = (adc_value * 3300) / 4095; // 4095 is the max value of adc we read from the dial, 3300 mili volts corresponds to 4095/4095
-        resistance = (adc_value * R_TOTAL_OHMS) / 4095;
+        resistance = (adc_value * R_TOTAL_OHMS) / 4095; // 4095 is the max value of adc we read from the dial, 5000 ohms corresponds to 4095/4095
 
         char buffer[17];   // 16 characters fit on one line + 1 for the '\0' terminator
 
 
-        counter++;
-        if(counter > 50000)
-        {
+        // counter++;
+        // if(counter > 50000)
+        // {
             counter = 0;
-            trace_printf("ADC Value: %u\n", adc_value); // Only print every so often
+            // trace_printf("ADC Value: %u\n", adc_value); // Only print every so often
 
-            trace_printf("ADC: %u  Voltage: %u mV  Resistance: %u ohms\n", adc_value, millivolts, resistance);
+            // trace_printf("ADC: %u  Voltage: %u mV  Resistance: %u ohms\n", adc_value, millivolts, resistance);
 
-            snprintf(buffer, sizeof(buffer), "ADC: %4u", (unsigned int)adc_value);   // text like "ADC: 2048"
-            oled_set_cursor(0, 0);       // page 0 = top line, column 0 = left edge
-            oled_print(buffer);          // draw it
+            // snprintf(buffer, sizeof(buffer), "ADC: %4u", (unsigned int)adc_value);   // text like "ADC: 2048"
+            // oled_set_cursor(0, 0);       // page 0 = top line, column 0 = left edge
+            // oled_print(buffer);          // draw it
 
-            snprintf(buffer, sizeof(buffer), "R: %4u Ohms", (unsigned int)resistance); // text like "R: 2500 Ohms"
-            oled_set_cursor(2, 0);       // page 2 = third line
+
+            snprintf(buffer, sizeof(buffer), "R: %4u Ohms  ", (unsigned int)resistance);
+            oled_set_cursor(0, 0);                     // top line
             oled_print(buffer);
 
+            snprintf(buffer, sizeof(buffer), "F: %5u Hz   ", (unsigned int)frequency);
+            oled_set_cursor(2, 0);
+            oled_print(buffer);
 
-        }
+            // snprintf(buffer, sizeof(buffer), "Src: %-8s", use_555 ? "555" : "FuncGen");
+            // oled_set_cursor(4, 0);
+            // oled_print(buffer);
+
+        // }
     }
 
     return 0;
@@ -92,169 +120,51 @@ int main(int argc, char* argv[]){
 }
 
 
-void ADC_INIT(void){
-
-    RCC->AHBENR |= RCC_AHBENR_GPIOAEN; /*
-    Turns on power to GPIO port A
-    RCC is the Reset and Clock Control register
-    AHBENR is the bus that the GPIO is on
-    RCC_AHBENR_GPIOAEN is the bit that turns on the clock for GPIO port A
-    */ 
-                                        
-
-    RCC->APB2ENR |= RCC_APB2ENR_ADCEN; /*
-    Turns on power to the ADC
-    APB2ENR is the bus that the ADC is on
-    RCC_APB2ENR_ADCEN is the bit that turns on the clock for the ADC
-    */
-
-    RCC->CR2 |= RCC_CR2_HSI14ON; /*
-    
-    CR2 handles the 14 MHz clock for the ADC
-    RCC_CR2_HSI14ON is the bit that turns on the clock for the ADC
-    */
-
-    while((RCC->CR2 & RCC_CR2_HSI14RDY) == 0) // This pauses until the ADC clock is ready
-    // CR2 is the clock control register (It holds the status of the clock)
-    // RCC_CR2_HSI14RDY is the bit that indicates whether the clock is ready
-    // 1 means the clock is ready, 0 means it is not ready
+// Interrupt handler for when user presses button
+void EXTI0_1_IRQHandler(void)
+{
+    if (EXTI->PR & EXTI_PR_PR0)
     {
-        // Wait for HSI14 to be ready
-    }
+        TIM2->CR1 &= ~TIM_CR1_CEN;             // stop any measurement in progress
+        first_edge = 1;                        // next edge will start a fresh measurement
+        frequency = 0;                         // clear the old number
 
-    GPIOA->MODER |= GPIO_MODER_MODER1; /*
-    This switches pin PA1 to analog mode
-    GPIOA is the GPIO port A
-    MODER is the mode register
-    GPIO_MODER_MODER1 is the bit that switches pin 1 to analog mode
+        use_555 = !use_555;                    // flip the choice
 
-    //00 is Input
-    //01 is Output
-    //10 is Alternate Function
-    //11 is Analog
-
-    */
-
-    GPIOA->PUPDR &= ~(GPIO_PUPDR_PUPDR1); /*
-    
-    Makes sure that pin PA1 has no pull-up or pull-down resistor
-    We do this since we want to measure the voltage on the pin, and a pull-up or pull-down resistor would affect the voltage by making it higher or lower than it actually is
-    GPIOA is the GPIO port A
-    PUPDR is the pull-up/pull-down register
-    GPIO_PUPDR_PUPDR1 is the bit that controls the pull-up/pull-down resistor for pin 1
-    We want to make sure that this bit is 00, which means no pull-up/pull-down resistor
-    Since were turning it off we use AND
-    */
-
-    // Calibration
-
-    // First have to make sure the ADC is off
-
-    /*
-    This checks to see if the ADC is enabled
-    ADC1 is the ADC
-    CR is the control register
-    ADC_CR_ADEN is the bit that indicates whether the ADC is enabled
-    1 means the ADC is enabled, 0 means it is not
-    */
-    if(( ADC1->CR & ADC_CR_ADEN) != 0)
-    {
-        ADC1->CR |= ADC_CR_ADDIS; // This disables the ADC
-
-        while((ADC1->CR & ADC_CR_ADEN) != 0)
-        {
-            // Wait for ADC to be disabled
+        if (use_555) {
+            EXTI->IMR &= ~EXTI_IMR_MR2;        // ignore function generator
+            EXTI->IMR |=  EXTI_IMR_MR3;        // listen to 555
+        } else {
+            EXTI->IMR &= ~EXTI_IMR_MR3;        // ignore 555
+            EXTI->IMR |=  EXTI_IMR_MR2;        // listen to function generator
         }
+
+        EXTI->PR = EXTI_PR_PR2 | EXTI_PR_PR3;  // throw away leftover edges
+        EXTI->PR = EXTI_PR_PR0;                // clear the button flag
     }
-
-    ADC1->CR |= ADC_CR_ADCAL; // Setting ADCAL means to start calibrating it
-
-    while ((ADC1->CR & ADC_CR_ADCAL) != 0); // Wait until the calibration is done
+}
 
 
 
-    // Configuration
-
-    ADC1->CFGR1 &= ~(ADC_CFGR1_RES | ADC_CFGR1_ALIGN); /*
-    
-    CFRG1 is the ADC main settings register
-    ADC_CFGR1_RES control how many bits the value of the ADC is
-    00 is 12 bits
-    01 is 10 bits
-    10 is 8 bits
-    11 is 6 bits
-    ADC_CFGR1_ALIGN controls whether the value of the ADC is left or right aligned
-    0 is right aligned
-    1 is left aligned
-    
-    */
-
-    ADC1->CFGR1 |= ADC_CFGR1_CONT;/*
-    
-    CFGR1 is the ADC main settings register
-    ADC_CFGR1_CONT controls whether the ADC is in continuous mode or single conversion mode
-    0 is single conversion mode
-    1 is continuous mode
-
-    */
-
-    ADC1->CFGR1 |= ADC_CFGR1_OVRMOD;/*
-    
-    ADC_CFGR1_OVRMOD controls if ADC is in overrun mode or not
-    0 is overrun mode disabled
-    1 is overrun mode enabled
-    Overrun mode means that if a new result arrives before the old one is read
-    the old one is overwritten and lost
-    */
-
-    ADC1->CHSELR = ADC_CHSELR_CHSEL1;/*
-    
-    CHSELR is the channel selection register
-    ADC_CHSELR_CHSEL1 is the bit that selects channel 1 (PA1)
-    Channel 1 means we use PA1 as the input to the ADC
-    We dont to OR this because we only want to use channel 1, not any other channels
-
-    */
-
-    ADC1->SMPR |= ADC_SMPR_SMP;/*
-    
-    SMPR is the sample time register
-    ADC_SMPR_SMP is the bit that controls the sample time
-    We went with the longest sample time because it is the most accurate
-    111, which is 239.5 ADC clock cycles
-    
-    */
-
-
-
-    
-    ADC1->ISR |= ADC_ISR_ADRDY;/*
-    
-    We want to clear the ADRDY bit in the ISR register before we turn on the ADC
-    We do that by writing 1 which clears the bit to 0
-    */
-
-
-    // Turn the ADC on
-    ADC1->CR |= ADC_CR_ADEN;
-
-
-
-    while ((ADC1->ISR & ADC_ISR_ADRDY) == 0); // Wait for the ADC to be ready
-
-
-    // Start it
-
-    ADC1->CR |= ADC_CR_ADSTART;/*
-    
-    CR is the control register
-    ADC_CR_ADSTART is the bit that starts the ADC conversion
-    1 means start the conversion
-    0 means do not start the conversion
-
-    */
-
-
+void EXTI2_3_IRQHandler(void)
+{
+if (EXTI->PR & (EXTI_PR_PR2 | EXTI_PR_PR3))    {
+        if (first_edge)
+        {
+            TIM2->CNT = 0;                   // reset stopwatch
+            TIM2->CR1 |= TIM_CR1_CEN;        // start it
+            first_edge = 0;
+        }
+        else
+        {
+            TIM2->CR1 &= ~TIM_CR1_CEN;       // stop it
+            uint32_t ticks = TIM2->CNT;      // how long one wiggle took
+            if (ticks > 0)
+                frequency = SystemCoreClock / ticks;
+            first_edge = 1;
+        }
+        EXTI->PR = EXTI_PR_PR2 | EXTI_PR_PR3;              // tell the hardware "handled it" (write 1 to clear)
+    }
 }
 
 
@@ -493,4 +403,221 @@ void oled_config(void)                                        // one-time displa
 
     for (unsigned int i = 0; i < sizeof(oled_init_cmds); i++) // send every init command
         oled_send(oled_init_cmds[i], 0);                      // 0 = these are commands, not data
+}
+
+void DAC_INIT(void)
+{
+    RCC->AHBENR  |= RCC_AHBENR_GPIOAEN;     // clock for GPIO port A (PA4 lives here)
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN;      // clock for the DAC (it's on APB1, unlike the ADC on APB2)
+
+    GPIOA->MODER |= GPIO_MODER_MODER4;      // PA4 = 11 = analog mode
+    GPIOA->PUPDR &= ~GPIO_PUPDR_PUPDR4;     // no pull-up/pull-down
+
+    DAC->CR |= DAC_CR_EN1;                  // switch on DAC channel 1
+}
+
+void TIM2_INIT(void)
+{
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;   // turn on TIM2's clock
+    TIM2->PSC = 0;                        // no slowdown: count at 48 MHz
+    TIM2->ARR = 0xFFFFFFFF;               // count as high as possible before wrapping
+    TIM2->EGR |= TIM_EGR_UG;              // apply those settings
+}
+
+
+
+void EXTI_INIT(void)
+{
+    // Clocks
+    RCC->AHBENR  |= RCC_AHBENR_GPIOAEN | RCC_AHBENR_GPIOBEN;
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGCOMPEN;
+
+    // Pins as inputs
+    GPIOA->MODER &= ~GPIO_MODER_MODER0;                // PA0 = USER button
+    GPIOB->MODER &= ~(GPIO_MODER_MODER2 | GPIO_MODER_MODER3);   // PB2 = func gen, PB3 = 555
+    GPIOB->PUPDR &= ~(GPIO_PUPDR_PUPDR2 | GPIO_PUPDR_PUPDR3);   // no pull
+
+    // Route pins to EXTI lines
+    SYSCFG->EXTICR[0] &= ~(SYSCFG_EXTICR1_EXTI0 | SYSCFG_EXTICR1_EXTI2 | SYSCFG_EXTICR1_EXTI3);
+    SYSCFG->EXTICR[0] |=  (SYSCFG_EXTICR1_EXTI2_PB | SYSCFG_EXTICR1_EXTI3_PB);  // line 0 stays port A
+
+    // Rising edge triggers
+    EXTI->RTSR |= EXTI_RTSR_TR0 | EXTI_RTSR_TR2 | EXTI_RTSR_TR3;
+
+    // Enable: button + 555 only. PB2 (MR2) stays off until the button is pressed.
+    EXTI->IMR |= EXTI_IMR_MR0 | EXTI_IMR_MR3;
+
+    // CPU side
+    NVIC_SetPriority(EXTI0_1_IRQn, 0);                 // button = most urgent
+    NVIC_EnableIRQ(EXTI0_1_IRQn);
+    NVIC_SetPriority(EXTI2_3_IRQn, 1);
+    NVIC_EnableIRQ(EXTI2_3_IRQn);
+}
+
+
+
+
+void ADC_INIT(void){
+
+    RCC->AHBENR |= RCC_AHBENR_GPIOAEN; /*
+    Turns on power to GPIO port A
+    RCC is the Reset and Clock Control register
+    AHBENR is the bus that the GPIO is on
+    RCC_AHBENR_GPIOAEN is the bit that turns on the clock for GPIO port A
+    */ 
+                                        
+
+    RCC->APB2ENR |= RCC_APB2ENR_ADCEN; /*
+    Turns on power to the ADC
+    APB2ENR is the bus that the ADC is on
+    RCC_APB2ENR_ADCEN is the bit that turns on the clock for the ADC
+    */
+
+    RCC->CR2 |= RCC_CR2_HSI14ON; /*
+    
+    CR2 handles the 14 MHz clock for the ADC
+    RCC_CR2_HSI14ON is the bit that turns on the clock for the ADC
+    */
+
+    while((RCC->CR2 & RCC_CR2_HSI14RDY) == 0) // This pauses until the ADC clock is ready
+    // CR2 is the clock control register (It holds the status of the clock)
+    // RCC_CR2_HSI14RDY is the bit that indicates whether the clock is ready
+    // 1 means the clock is ready, 0 means it is not ready
+    {
+        // Wait for HSI14 to be ready
+    }
+
+    GPIOA->MODER |= GPIO_MODER_MODER1; /*
+    This switches pin PA1 to analog mode
+    GPIOA is the GPIO port A
+    MODER is the mode register
+    GPIO_MODER_MODER1 is the bit that switches pin 1 to analog mode
+
+    //00 is Input
+    //01 is Output
+    //10 is Alternate Function
+    //11 is Analog
+
+    */
+
+    GPIOA->PUPDR &= ~(GPIO_PUPDR_PUPDR1); /*
+    
+    Makes sure that pin PA1 has no pull-up or pull-down resistor
+    We do this since we want to measure the voltage on the pin, and a pull-up or pull-down resistor would affect the voltage by making it higher or lower than it actually is
+    GPIOA is the GPIO port A
+    PUPDR is the pull-up/pull-down register
+    GPIO_PUPDR_PUPDR1 is the bit that controls the pull-up/pull-down resistor for pin 1
+    We want to make sure that this bit is 00, which means no pull-up/pull-down resistor
+    Since were turning it off we use AND
+    */
+
+    // Calibration
+
+    // First have to make sure the ADC is off
+
+    /*
+    This checks to see if the ADC is enabled
+    ADC1 is the ADC
+    CR is the control register
+    ADC_CR_ADEN is the bit that indicates whether the ADC is enabled
+    1 means the ADC is enabled, 0 means it is not
+    */
+    if(( ADC1->CR & ADC_CR_ADEN) != 0)
+    {
+        ADC1->CR |= ADC_CR_ADDIS; // This disables the ADC
+
+        while((ADC1->CR & ADC_CR_ADEN) != 0)
+        {
+            // Wait for ADC to be disabled
+        }
+    }
+
+    ADC1->CR |= ADC_CR_ADCAL; // Setting ADCAL means to start calibrating it
+
+    while ((ADC1->CR & ADC_CR_ADCAL) != 0); // Wait until the calibration is done
+
+
+
+    // Configuration
+
+    ADC1->CFGR1 &= ~(ADC_CFGR1_RES | ADC_CFGR1_ALIGN); /*
+    
+    CFRG1 is the ADC main settings register
+    ADC_CFGR1_RES control how many bits the value of the ADC is
+    00 is 12 bits
+    01 is 10 bits
+    10 is 8 bits
+    11 is 6 bits
+    ADC_CFGR1_ALIGN controls whether the value of the ADC is left or right aligned
+    0 is right aligned
+    1 is left aligned
+    
+    */
+
+    ADC1->CFGR1 |= ADC_CFGR1_CONT;/*
+    
+    CFGR1 is the ADC main settings register
+    ADC_CFGR1_CONT controls whether the ADC is in continuous mode or single conversion mode
+    0 is single conversion mode
+    1 is continuous mode
+
+    */
+
+    ADC1->CFGR1 |= ADC_CFGR1_OVRMOD;/*
+    
+    ADC_CFGR1_OVRMOD controls if ADC is in overrun mode or not
+    0 is overrun mode disabled
+    1 is overrun mode enabled
+    Overrun mode means that if a new result arrives before the old one is read
+    the old one is overwritten and lost
+    */
+
+    ADC1->CHSELR = ADC_CHSELR_CHSEL1;/*
+    
+    CHSELR is the channel selection register
+    ADC_CHSELR_CHSEL1 is the bit that selects channel 1 (PA1)
+    Channel 1 means we use PA1 as the input to the ADC
+    We dont to OR this because we only want to use channel 1, not any other channels
+
+    */
+
+    ADC1->SMPR |= ADC_SMPR_SMP;/*
+    
+    SMPR is the sample time register
+    ADC_SMPR_SMP is the bit that controls the sample time
+    We went with the longest sample time because it is the most accurate
+    111, which is 239.5 ADC clock cycles
+    
+    */
+
+
+
+    
+    ADC1->ISR |= ADC_ISR_ADRDY;/*
+    
+    We want to clear the ADRDY bit in the ISR register before we turn on the ADC
+    We do that by writing 1 which clears the bit to 0
+    */
+
+
+    // Turn the ADC on
+    ADC1->CR |= ADC_CR_ADEN;
+
+
+
+    while ((ADC1->ISR & ADC_ISR_ADRDY) == 0); // Wait for the ADC to be ready
+
+
+    // Start it
+
+    ADC1->CR |= ADC_CR_ADSTART;/*
+    
+    CR is the control register
+    ADC_CR_ADSTART is the bit that starts the ADC conversion
+    1 means start the conversion
+    0 means do not start the conversion
+
+    */
+
+
 }
