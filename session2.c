@@ -9,7 +9,64 @@
 #pragma GCC diagnostic ignored "-Wreturn-type"
 
 
+// General overview
+
+/*
+
+Data Flow:
+
+- User turns the pot, which cahnges the voltage on the ADC pin (PA1), which outputs a value between 0 and 4095
+Main polls the ADC until it finished converting a calue and stores the value in adc_value
+
+- The adc_value is then written to the DAC, which outputs a proportional voltage on the DAC pin (PA4)
+  That voltage then drives the LED side of the optocoupler, which then acts as a voltage-controlled resistor for the 555 timer circuit
+  so that means turning the pot changes the 555 output frequency
+  essentially, this just means that by turning the pot we can change the frequency of the square wave output from the 555 timer
+
+- The adc_value is also converted to milivolts and to resistance, 
+  which are then displayed on the OLED display, so that the user can see what the pot is set to
+
+- The signal that is being measured is wired to PB3 (If 555 output) or PB2 (If function generator output)/ 
+  Each rising edge triggers an interrupt, the first edge zeros and starts the timer, the second edge stops it. The tick count in one period, 
+  so we can calculate the frequency by doing SystemCoreClock / ticks, and then display that on the OLED display
+
+  Each time the user button is pressed, it clears the old frequency, flips the use_555 flag
+
+*/
+
+
+/*
+
+Pin inputs that trigger interrupts:
+
+- PA0: User button, when this button is pressed, a rising edge occurs and is detected it runs the EXTI0_1_IRQHandler, which clears the old frequency and flips the use_555 flag
+- PB2: Function generator output, when a rising edge occurs, it is detected it runs the EXTI2_3_IRQHandler, which either starts or stops the timer depending on if its the first or second edge
+- PB3: 555 timer output, when a rising edge occurs, it is detected it runs the EXTI2_3_IRQHandler, which either starts or stops the timer depending on if its the first or second edge
+
+Analog Pins:
+
+- PA1: The ADC input pin, which is connected to the potentiometer, which is used to control the frequency of the 555 timer output
+- PA4: The DAC output pin, which is connected to the LED side of the optocoupler, which is used to control the resistance of the 555 timer circuit
+
+Display Pins:
+- PB8: Chip Select pin, which is used to select the OLED display, low means the display is selected, high means it is not selected
+- P89: Low means the next byte is a command, high means pixel data.
+- PB11: Reset pin, low means the display is held in reset, high means the display is running
+- PB13: The SPI hardware pulses this to clock each bit
+- PB15: The SPI hardware shifts the bits out here
+
+*/
+
+
+
+
+
+
+
+
 #define R_TOTAL_OHMS 5000 // We found this in the pot section of the manual
+
+
 
 // Used to turn the ADC's unitless fraction (0-4095) into ohms; 5000 is the value at full turn
 
@@ -123,11 +180,14 @@ int main(int argc, char* argv[]){
 // Interrupt handler for when user presses button
 void EXTI0_1_IRQHandler(void)
 {
-    if (EXTI->PR & EXTI_PR_PR0)
+
+    // Only continue if EXTI line 0 (the USER button on PA0) is the one that's pending.
+    // Lines 0 and 1 share this handler, so we confirm which line fired before acting.
+    if (EXTI->PR & EXTI_PR_PR0) // EXTI_PR_PR0 is the pending register for line 0, which is the USER button on PA0
     {
         TIM2->CR1 &= ~TIM_CR1_CEN;             // stop any measurement in progress
         first_edge = 1;                        // next edge will start a fresh measurement
-        frequency = 0;                         // clear the old number
+        frequency = 0;                         // clear the old frequency, so that we can remeasure frequency each time the wave source is changed
 
         use_555 = !use_555;                    // flip the choice
 
@@ -139,27 +199,28 @@ void EXTI0_1_IRQHandler(void)
             EXTI->IMR |=  EXTI_IMR_MR2;        // listen to function generator
         }
 
+        // 
         EXTI->PR = EXTI_PR_PR2 | EXTI_PR_PR3;  // throw away leftover edges
-        EXTI->PR = EXTI_PR_PR0;                // clear the button flag
+        EXTI->PR = EXTI_PR_PR0;                // clear the button flag, if we didnt do this then the interrupt would fire again immediately after we exit this handler
     }
 }
 
 
-
+// function to handle the external interrupts from the 555 timer and function generator
 void EXTI2_3_IRQHandler(void)
 {
 if (EXTI->PR & (EXTI_PR_PR2 | EXTI_PR_PR3))    {
-        if (first_edge)
+        if (first_edge) // If its the first edge, we start the timer and wait for the second edge to stop it
         {
-            TIM2->CNT = 0;                   // reset stopwatch
-            TIM2->CR1 |= TIM_CR1_CEN;        // start it
+            TIM2->CNT = 0;                   // reset timer
+            TIM2->CR1 |= TIM_CR1_CEN;        // start timer
             first_edge = 0;
         }
         else
         {
-            TIM2->CR1 &= ~TIM_CR1_CEN;       // stop it
-            uint32_t ticks = TIM2->CNT;      // how long one wiggle took
-            if (ticks > 0)
+            TIM2->CR1 &= ~TIM_CR1_CEN;       // stop timer
+            uint32_t ticks = TIM2->CNT;      // The number of ticks that have passed between the first and second edge, which is the period of the wave in ticks
+            if (ticks > 0) // Just to check that we dont divide by zero
                 frequency = SystemCoreClock / ticks;
             first_edge = 1;
         }
@@ -172,19 +233,17 @@ if (EXTI->PR & (EXTI_PR_PR2 | EXTI_PR_PR3))    {
 #define DC(x)  (GPIOB->BSRR = (x) ? (1U << 9)  : (1U << (9 + 16)))   // PB9  D/C#: 1 = data byte, 0 = command byte
 #define RES(x) (GPIOB->BSRR = (x) ? (1U << 11) : (1U << (11 + 16)))  // PB11 RES#: 1 = run, 0 = hold in reset
 
-uint8_t oled_init_cmds[] = {                                  // setup commands copied from the handout
-    0xAE, 0x20, 0x00, 0x40, 0xA0 | 0x01, 0xA8, 0x40 - 1,      // display off, horizontal addressing, flip, 64 rows
-    0xC0 | 0x08, 0xD3, 0x00, 0xDA, 0x32, 0xD5, 0x80,          // scan direction, offset, pin config, clock
-    0xD9, 0x22, 0xDB, 0x30, 0x81, 0xFF, 0xA4, 0xA6,           // precharge, VCOMH, max contrast, normal display
-    0xAD, 0x30, 0x8D, 0x10, 0xAE | 0x01, 0xC0, 0xA0           // as handout, 0xAF = display ON
+uint8_t oled_init_cmds[] = {                                  // setup commands copied from the handout, these just make sure the led is setup correctly
+    0xAE, 0x20, 0x00, 0x40, 0xA0 | 0x01, 0xA8, 0x40 - 1,      
+    0xC0 | 0x08, 0xD3, 0x00, 0xDA, 0x32, 0xD5, 0x80,          
+    0xD9, 0x22, 0xDB, 0x30, 0x81, 0xFF, 0xA4, 0xA6,           
+    0xAD, 0x30, 0x8D, 0x10, 0xAE | 0x01, 0xC0, 0xA0           
 };
 
 //
-// Character specifications for LED Display (1 row = 8 bytes = 1 ASCII character)
-// Example: to display '4', retrieve 8 data bytes stored in Characters[52][X] row
-//          (where X = 0, 1, ..., 7) and send them one by one to LED Display. 
-// Row number = character ASCII code (e.g., ASCII code of '4' is 0x34 = 52)
-//
+// Character specifications for LED Display
+// Row number is the character ASCII code, so like the number 4 is ASCII is 52 so its in row 52
+
 unsigned char Characters[][8] = {
     {0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,0b00000000, 0b00000000, 0b00000000},  // SPACE
     {0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,0b00000000, 0b00000000, 0b00000000},  // SPACE
@@ -405,10 +464,20 @@ void oled_config(void)                                        // one-time displa
         oled_send(oled_init_cmds[i], 0);                      // 0 = these are commands, not data
 }
 
-void DAC_INIT(void)
-{
-    RCC->AHBENR  |= RCC_AHBENR_GPIOAEN;     // clock for GPIO port A (PA4 lives here)
-    RCC->APB1ENR |= RCC_APB1ENR_DACEN;      // clock for the DAC (it's on APB1, unlike the ADC on APB2)
+
+// Power up DAC channel 1 and connect it to pin PA4 as an analog output.
+// The DAC turns the ADC reading into a voltage that drives the optocoupler, which controls the 555's frequency
+void DAC_INIT(void){
+
+     RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+    /*
+    Turns on power to GPIO port A
+    RCC is the Reset and Clock Control register
+    AHBENR is the bus that the GPIO is on
+    RCC_AHBENR_GPIOAEN is the bit that turns on the clock for GPIO port A
+    */ 
+
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN;      // Turn on the DAC clock
 
     GPIOA->MODER |= GPIO_MODER_MODER4;      // PA4 = 11 = analog mode
     GPIOA->PUPDR &= ~GPIO_PUPDR_PUPDR4;     // no pull-up/pull-down
@@ -419,8 +488,8 @@ void DAC_INIT(void)
 void TIM2_INIT(void)
 {
     RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;   // turn on TIM2's clock
-    TIM2->PSC = 0;                        // no slowdown: count at 48 MHz
-    TIM2->ARR = 0xFFFFFFFF;               // count as high as possible before wrapping
+    TIM2->PSC = 0;                        // no slowdown: count at 48 MHz, it divides by this value + 1, so 0 means divide by 1
+    TIM2->ARR = 0xFFFFFFFF;               // count as high as possible before wrapping, this will take about 89 seconds at 48 MHz
     TIM2->EGR |= TIM_EGR_UG;              // apply those settings
 }
 
