@@ -1,0 +1,86 @@
+Test 0: Build and clock
+
+ *   Goal:   Confirm it builds and the CPU really runs at 48 MHz. 
+ *   How:    Temporarily add trace_printf("clk=%u\n", (unsigned)SystemCoreClock); right after SystemClock48MHz().
+ *   Expect: 48000000. If it prints 8000000, SystemCoreClockUpdate() or the PLL setup is wrong.
+ *   Why:    TIM2 timing, the delay loop and every frequency reading assume 48 MHz.
+
+
+Test 1: POT -> ADC -> COMPUTER
+ *   Goal:   Prove the ADC polling loop works and find the pot's real limits.
+ *   How:    Uncomment the trace_printf lines in the throttled block (adc_value, millivolts, resistance).
+ *           Turn the pot slowly from one end to the other.
+ *   Expect: adc_value moves smoothly; millivolts matches a multimeter on PA1 (within a few mV);
+ *           resistance rises as adc_value rises.
+ *   RECORD: adc_value at both ends (min / max), millivolts at both ends (these are the voltage limits the handout asks for),
+ *           and which turn direction increases the value.
+ *   If it fails: stuck at one value -> check PA1 analog mode and that ADSTART ran; stuck at 0 or 4095 -> check pot wiring/ground.
+ *   Check:  If max adc_value is clearly below 4095, replace 4095 in the resistance formula with the measured max.
+
+
+TEST 2 - POT -> ADC -> OLED  (keeps Test 1 running)
+ *   Goal:   Prove the display path (SPI, init commands, font) and that the text matches the real value.
+ *   How:    Leave the trace_printf lines on. The R line is on page 0 of the OLED.
+ *   Expect: The OLED resistance matches the console resistance at every pot position; no stray digits when the
+ *           value shrinks (e.g. 1000 -> 999); updates about once per second.
+ *   If it fails: blank screen -> check the display wiring and the RES#/CS# pin setup; garbled text -> check D/C# and the
+ *           init commands; text in the wrong place -> revisit the cursor/addressing-mode note about oled_set_cursor
+
+
+TEST 3 - ADC -> DAC  (tested at the pin first; keeps Tests 1-2 running)
+ *   Goal:   Prove the DAC outputs the voltage the ADC measured.
+ *   How:    Leave the optocoupler DISCONNECTED. Put a multimeter on PA4 and turn the pot.
+ *   Expect: PA4 voltage tracks the millivolts value (same shape; small differences are normal).
+ *   RECORD: PA4 voltage at both pot ends. The buffered DAC output may not reach exactly 0 V or 3.3 V.
+ *   If it fails: constant 0 V -> check the DAC clock/enable (EN1) and PA4 analog mode
+
+
+TEST 4 - DAC -> OPTOCOUPLER -> 555  (555 checked with a scope, independent of the frequency code)
+ *   Goal:   Prove the pot really controls the 555 before trusting any measurement code.
+ *   How:    Connect PA4 to the optocoupler through its series resistor. Put the scope on the 555 output (not on the MCU).
+ *           Turn the pot and watch frequency and duty cycle. Keep Tests 1-3 running.
+ *   Expect: The 555 output changes as the pot turns. There may be a dead zone near the low end where the opto LED is
+ *           below its turn-on voltage (about 1.2 V as I recall; check the 4N35 datasheet) and nothing changes.
+ *   RECORD: Scope frequency (min / max), the dead-zone edge (pot position or adc_value), and the 555 output voltage swing.
+ *           These scope readings are the reference values for Test 5.
+ *   If it fails: no change at all -> check the opto wiring and series resistor; PA4 voltage still fine from Test 3.
+
+
+TEST 5 - 555 -> PB3 -> EXTI -> TIM2 -> FREQUENCY ON OLED  (keeps Tests 1-4 running)
+ *   Goal:   Prove edge detection, the stopwatch and the frequency math on the real 555 signal.
+ *   How:    Wire the 555 output to PB3 (shared ground). Add trace_printf("F=%u\n", (unsigned)frequency); to the printing block.
+ *           Compare the OLED F line to the scope frequency at several pot positions.
+ *   Expect: F matches the scope (within a small percent) and changes as the pot turns. The R line still tracks the pot.
+ *   If it fails: F stays 0 -> check wiring/ground, put a breakpoint in EXTI2_3_IRQHandler and see whether it is reached;
+ *           if not, recheck the EXTI gates (clock, EXTICR, RTSR, IMR, NVIC); program freezes -> the PR flag is not being cleared.
+ *           In the debugger watch first_edge toggling 1 -> 0 -> 1 on successive edges.
+ *   Note:   The last digits may flicker from jitter and truncation; this is normal for single-period measurement
+
+
+ * TEST 6 - USER BUTTON (tested alone, no generator connected)
+ *   Goal:   Prove the source switch works before involving the second signal.
+ *   How:    Press the button once and watch the "Src:" line and the F line.
+ *   Expect: Src changes 555 <-> FuncGen on each press; F drops to 0 when the new source has no signal;
+ *           pressing again returns to the 555 and its frequency reappears (Test 5 behavior).
+ *   Check:  One press should toggle exactly once. If it sometimes toggles twice or not at all, that is switch bounce;
+ *           record it as a known limitation (an ignore window of roughly 200 ms would fix it).
+ *   If it fails: no response -> breakpoint in EXTI0_1_IRQHandler; check line 0 setup and the NVIC enable.
+
+
+ * TEST 7 - FUNCTION GENERATOR -> PB2: ACCURACY (keeps everything running)
+ *   Goal:   Check accuracy against a known source, then find the frequency limits.
+ *   How:    Set the generator to a 3.3 V-max (0 V low) square wave. Wire it to PB2 with shared ground. Press the button.
+ *           Step through 10 Hz, 100 Hz, 1 kHz, 10 kHz, 50 kHz, 100 kHz, then keep raising it.
+ *   Expect: Display matches the generator (cross-check on the scope, since the generator's dial has its own tolerance).
+ *           The R line keeps updating with the pot even in generator mode.
+ *   RECORD: A table of generator frequency vs displayed frequency vs percent error.
+ *           The highest frequency still read correctly, and what failure looks like beyond it (erratic, too low, frozen screen).
+ *           The lowest frequency tested and how long the reading takes to appear.
+ *   Why:    The maximum is set by interrupt entry/exit time and merged pending flags, which is the key limitation to explain.
+
+
+ * TEST 8 - FULL SYSTEM AND DEMO REHEARSAL
+ *   Goal:   Everything together, as the TA will see it.
+ *   How:    Toggle between sources several times, including pressing the button during a measurement; turn the pot in each mode.
+ *   Expect: Pot changes the 555 frequency in 555 mode and does not change the generator reading; R tracks the pot in both modes.
+ *   Cleanup: Remove or comment out all temporary trace_printf lines, then rerun this test once more.
